@@ -44,23 +44,22 @@ python pong_smoke_test.py --full-action-space
 
 ## 4. Collect a world-model dataset
 
-This collector saves full episodes in a format that is directly useful for the VAE -> sequence model pipeline from the World Models-style setup.
+The collector now supports total-step targets and multiple concurrent environments, which is much more practical for large runs.
 
 ```powershell
-python collect_pong_dataset.py --episodes 1000 --max-steps 4096
+python collect_pong_dataset.py --total-steps 1500000 --num-envs 16 --max-steps-per-episode 4096 --obs-type grayscale --resize 64 --output-dir data/pong_world_model_h200
 ```
 
-By default, it writes resized `64 x 64` RGB frames to `data/pong_world_model/`.
-The collector currently uses a random policy, which is fine for bootstrapping the VAE and dynamics model but will not give you strong gameplay behavior by itself.
+The collector still uses a random policy, which is acceptable for bootstrapping the VAE and latent dynamics model but is not enough by itself to learn a strong controller.
 The output directory must be empty or absent before each run so rollouts never get mixed across collections.
 
 Useful options:
 
 ```powershell
-python collect_pong_dataset.py --obs-type grayscale
-python collect_pong_dataset.py --resize 0
+python collect_pong_dataset.py --episodes 1000 --max-steps-per-episode 4096
+python collect_pong_dataset.py --total-steps 500000 --num-envs 8
+python collect_pong_dataset.py --obs-type rgb
 python collect_pong_dataset.py --full-action-space
-python collect_pong_dataset.py --output-dir data/pong_world_model_gray
 ```
 
 Dataset layout:
@@ -85,32 +84,36 @@ How this maps onto world-model training:
 
 ## 5. Train the world model stack
 
-The training scripts in this repo assume `64 x 64` observations for the VAE, so keep `--resize 64` for trainable datasets.
+The upgraded stack is designed around `64 x 64` observations, a larger residual VAE, a deeper MDN-RNN, and a PPO controller that acts on frozen VAE + RNN features.
 
-One-command pipeline:
+Smoke test pipeline:
 
 ```powershell
-python train_world_model_pipeline.py --run-dir runs/pong_world_model
+python train_world_model_pipeline.py --run-dir runs/pong_world_model_smoke_v2 --preset smoke
 ```
 
-That will:
+H200-oriented pipeline:
 
-- collect a fresh grayscale dataset
-- train a VAE on frames
-- encode the dataset into latent sequences
-- train the MDN-RNN on latent dynamics
-- train a controller using the frozen VAE and MDN-RNN state on the real environment
+```powershell
+python train_world_model_pipeline.py --run-dir runs/pong_world_model_h200 --preset h200
+```
+
+The `h200` preset is sized for real training, not quick verification. It collects about `1.5M` steps, trains a larger VAE and MDN-RNN, and runs PPO for millions of controller timesteps.
 
 You can also run each stage separately:
 
 ```powershell
-python train_vae.py --dataset-dir runs/pong_world_model/dataset --output-dir runs/pong_world_model/vae
-python encode_latents.py --dataset-dir runs/pong_world_model/dataset --checkpoint runs/pong_world_model/vae/best.pt --output-dir runs/pong_world_model/latents
-python train_mdn_rnn.py --dataset-dir runs/pong_world_model/latents --output-dir runs/pong_world_model/mdn_rnn
-python train_controller.py --vae-checkpoint runs/pong_world_model/vae/best.pt --rnn-checkpoint runs/pong_world_model/mdn_rnn/best.pt --output-dir runs/pong_world_model/controller
+python train_vae.py --dataset-dir runs/pong_world_model_h200/dataset --output-dir runs/pong_world_model_h200/vae --latent-dim 128 --hidden-dims 96,192,384,768 --residual-blocks 2 --epochs 40 --batch-size 1024
+python encode_latents.py --dataset-dir runs/pong_world_model_h200/dataset --checkpoint runs/pong_world_model_h200/vae/best.pt --output-dir runs/pong_world_model_h200/latents
+python train_mdn_rnn.py --dataset-dir runs/pong_world_model_h200/latents --output-dir runs/pong_world_model_h200/mdn_rnn --hidden-size 1024 --num-layers 2 --num-mixtures 8 --epochs 30 --batch-size 512
+python train_controller.py --vae-checkpoint runs/pong_world_model_h200/vae/best.pt --rnn-checkpoint runs/pong_world_model_h200/mdn_rnn/best.pt --output-dir runs/pong_world_model_h200/controller --num-envs 16 --rollout-steps 256 --total-timesteps 5000000 --hidden-dims 512,512
 ```
 
-This is a baseline workflow, not a tuned Pong solution. Short runs are enough to verify the pipeline and produce checkpoints, but not enough to learn a strong policy.
+Notes:
+
+- `train_vae.py` and `train_mdn_rnn.py` default to `--num-workers 0` so they run safely in this workspace; on a real training box you can increase that.
+- The controller is now PPO, not the earlier REINFORCE baseline.
+- Better frame prediction quality depends mostly on the VAE and dataset size. Better gameplay depends heavily on the PPO controller run length.
 
 ## 6. Visualize imagined next frames
 
@@ -133,4 +136,3 @@ The output image rows are:
 - This setup uses `ALE/Pong-v5`, the current Pong environment id in the ALE namespace.
 - Older Gymnasium/ALE guides may mention AutoROM or `gymnasium[accept-rom-license]`. This workspace intentionally targets the newer `gymnasium[atari]` path.
 - Verified locally in this workspace with `gymnasium==1.2.3` and `ale-py==0.11.2`.
-"# WorldModel" 
