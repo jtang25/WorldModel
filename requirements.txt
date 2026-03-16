@@ -1,0 +1,2 @@
+gymnasium[atari]>=1.0,<2.0
+torch>=2.6,<3.0
